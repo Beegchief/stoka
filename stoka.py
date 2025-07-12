@@ -1,20 +1,22 @@
-from flask import Flask, render_template_string, request, session, send_file, jsonify
-from io import StringIO
-import sqlite3
 import os
+from flask import Flask, render_template_string, request, session, send_file, jsonify
+from io import BytesIO, StringIO
+import sqlite3
 import logging
 import csv
+import json
 from contextlib import contextmanager
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 
-# Set absolute path for inventory.db
+# Set database path for production
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app.config['DATABASE'] = os.path.join(BASE_DIR, 'inventory.db')
+DB_PATH = os.environ.get('DATABASE_URL', os.path.join(BASE_DIR, 'inventory.db'))
+app.config['DATABASE'] = DB_PATH
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Database context manager
@@ -35,7 +37,7 @@ def get_db():
 # Initialize database
 def init_db():
     db_path = app.config['DATABASE']
-    logger.debug(f"Checking database at: {db_path}")
+    logger.info(f"Checking database at: {db_path}")
     if not os.path.exists(db_path):
         logger.info(f"Creating database at: {db_path}")
         with get_db() as conn:
@@ -177,7 +179,15 @@ HTML_TEMPLATE = '''
                         <li class="list-group-item">{{ product['product_name'] }}</li>
                         {% endfor %}
                     </ul>
-                    <a href="/export_products" class="btn btn-primary">Download Reorder List</a>
+                    <div class="mb-3">
+                        <label class="form-label">Download Format</label>
+                        <select id="reorder-export-format" class="form-control" style="width: 200px; display: inline-block;">
+                            <option value="txt" selected>Text (.txt)</option>
+                            <option value="csv">CSV (.csv)</option>
+                            <option value="json">JSON (.json)</option>
+                        </select>
+                        <a href="/export_reorder_list?format=txt" id="export-reorder-link" class="btn btn-primary ms-2">Download Reorder List</a>
+                    </div>
                     {% else %}
                     <p>No items in the reorder list.</p>
                     {% endif %}
@@ -250,7 +260,7 @@ HTML_TEMPLATE = '''
                                 </div>
                                 <button type="submit" class="btn btn-primary">Import CSV</button>
                             </form>
-                            <a href="/export_products" class="btn btn-primary mt-2">Export Products to CSV</a>
+                            <a href="/export_products" class="btn btn-primary mt-2">Export All Products to CSV</a>
                         </div>
                     </div>
                     <div class="tab-pane fade {% if active_manage_tab == 'existing-products' %}show active{% endif %}" id="existing-products">
@@ -416,14 +426,39 @@ HTML_TEMPLATE = '''
                     reorderList.forEach(product => {
                         html += `<li class="list-group-item">${product.product_name}</li>`;
                     });
-                    html += '</ul><a href="/export_products" class="btn btn-primary">Download Reorder List</a>';
+                    html += `</ul>
+                        <div class="mb-3">
+                            <label class="form-label">Download Format</label>
+                            <select id="reorder-export-format" class="form-control" style="width: 200px; display: inline-block;">
+                                <option value="txt" selected>Text (.txt)</option>
+                                <option value="csv">CSV (.csv)</option>
+                                <option value="json">JSON (.json)</option>
+                            </select>
+                            <a href="/export_reorder_list?format=txt" id="export-reorder-link" class="btn btn-primary ms-2">Download Reorder List</a>
+                        </div>`;
                     reorderTab.innerHTML = html;
                 } else {
                     reorderTab.innerHTML = '<p>No items in the reorder list.</p>';
                 }
+                attachExportFormatListener();
             } catch (error) {
                 console.error('Error fetching reorder list:', error);
                 alert('Error fetching reorder list: ' + error.message);
+            }
+        }
+
+        // Handle export format selection
+        function attachExportFormatListener() {
+            const formatSelect = document.getElementById('reorder-export-format');
+            const exportLink = document.getElementById('export-reorder-link');
+            if (formatSelect && exportLink) {
+                formatSelect.addEventListener('change', () => {
+                    const selectedFormat = formatSelect.value;
+                    console.log('Export format selected:', selectedFormat);
+                    exportLink.href = `/export_reorder_list?format=${selectedFormat}`;
+                });
+            } else {
+                console.error('Error: #reorder-export-format or #export-reorder-link not found in DOM');
             }
         }
 
@@ -442,7 +477,7 @@ HTML_TEMPLATE = '''
                         const result = await response.json();
                         if (result.status === 'success') {
                             console.log('Shelf updated successfully');
-                            await updateReorderList(); // Always update reorder list
+                            await updateReorderList();
                             window.scrollTo(0, scrollY);
                         } else {
                             console.error('Error updating shelf:', result.message);
@@ -476,7 +511,6 @@ HTML_TEMPLATE = '''
                             form.reset();
                             window.scrollTo(0, scrollY);
                             alert(result.message || successMessage);
-                            // Refresh table after add/import
                             const shelfFilter = document.querySelector('#filter-products-form select[name="shelf_filter"]')?.value || 'all';
                             const filterResponse = await fetch(`/filter_products?shelf_filter=${shelfFilter}`);
                             if (filterResponse.ok) {
@@ -778,7 +812,7 @@ def import_products():
                 'status': 'success',
                 'message': f'Imported {rows_imported} products. {rows_skipped} rows skipped.'
             })
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.error(f"Error importing CSV: {e}")
             return jsonify({'status': 'error', 'message': f'Error importing CSV: {str(e)}'})
 
@@ -790,7 +824,7 @@ def export_products():
         c.execute('SELECT * FROM products ORDER BY product_id')
         products = c.fetchall()
         output = StringIO()
-        writer = csv.DictWriter(output, fieldnames=['product_id', 'product_name', 'shelf_number', 'in_stock'])
+        writer = csv.DictWriter(output, fieldnames=['product_id', 'product_name', 'shelf_number', 'in_stock'], lineterminator='\n')
         writer.writeheader()
         for product in products:
             writer.writerow({
@@ -800,12 +834,75 @@ def export_products():
                 'in_stock': 1 if product['in_stock'] else 0
             })
         output.seek(0)
+        bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+        logger.info(f"Exported all products to CSV, count={len(products)}")
         return send_file(
-            StringIO(output.getvalue()),
+            bytes_output,
             mimetype='text/csv',
             as_attachment=True,
             download_name='products_export.csv'
         )
+
+@app.route('/export_reorder_list')
+def export_reorder_list():
+    session['show_inventory'] = True
+    export_format = request.args.get('format', 'txt')
+    if export_format not in ['txt', 'csv', 'json']:
+        export_format = 'txt'
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT p.product_id, p.product_name, p.shelf_number
+            FROM products p JOIN shelves s ON p.shelf_number = s.shelf_number
+            WHERE p.in_stock = 0 AND s.checked = 1
+            ORDER BY p.shelf_number, p.product_name
+        ''')
+        reorder_list = c.fetchall()
+        if export_format == 'txt':
+            output = StringIO()
+            for product in reorder_list:
+                output.write(f"{product['product_name']}\n")
+            output.seek(0)
+            bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+            logger.info(f"Exported reorder list to TXT, count={len(reorder_list)}")
+            return send_file(
+                bytes_output,
+                mimetype='text/plain',
+                as_attachment=True,
+                download_name='reorder_list.txt'
+            )
+        elif export_format == 'csv':
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=['product_id', 'product_name', 'shelf_number'], lineterminator='\n')
+            writer.writeheader()
+            for product in reorder_list:
+                writer.writerow({
+                    'product_id': product['product_id'],
+                    'product_name': product['product_name'],
+                    'shelf_number': product['shelf_number']
+                })
+            output.seek(0)
+            bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+            logger.info(f"Exported reorder list to CSV, count={len(reorder_list)}")
+            return send_file(
+                bytes_output,
+                mimetype='text/csv',
+                as_attachment=True,
+                download_name='reorder_list.csv'
+            )
+        else:  # json
+            product_names = [product['product_name'] for product in reorder_list]
+            output = StringIO()
+            json.dump(product_names, output, indent=2)
+            output.seek(0)
+            bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+            logger.info(f"Exported reorder list to JSON, count={len(reorder_list)}")
+            return send_file(
+                bytes_output,
+                mimetype='application/json',
+                as_attachment=True,
+                download_name='reorder_list.json'
+            )
 
 @app.route('/filter_products', methods=['GET'])
 def filter_products():
@@ -818,7 +915,7 @@ def filter_products():
         else:
             c.execute('SELECT * FROM products WHERE shelf_number = ? ORDER BY product_id', (int(shelf_filter),))
         products = c.fetchall()
-        logger.debug(f"Filtered products for shelf_filter={shelf_filter}, count={len(products)}")
+        logger.info(f"Filtered products for shelf_filter={shelf_filter}, count={len(products)}")
         return jsonify({
             'status': 'success',
             'products': [{'product_id': p['product_id'], 'product_name': p['product_name'], 
@@ -837,7 +934,7 @@ def get_reorder_list():
             ORDER BY p.shelf_number, p.product_name
         ''')
         reorder_list = c.fetchall()
-        logger.debug(f"Reorder list fetched, count={len(reorder_list)}")
+        logger.info(f"Reorder list fetched, count={len(reorder_list)}")
         return jsonify([{'product_id': p['product_id'], 'product_name': p['product_name'], 
                         'shelf_number': p['shelf_number']} for p in reorder_list])
 
@@ -861,11 +958,12 @@ def show_inventory(active_tab='shelves', active_shelf_tab='shelf1', active_manag
             ORDER BY p.shelf_number, p.product_name
         ''')
         reorder_list = c.fetchall()
-        logger.debug(f"Rendering inventory: active_tab={active_tab}, shelf_filter={shelf_filter}, products={len(all_products)}, filtered={len(filtered_products)}, reorder={len(reorder_list)}")
+        logger.info(f"Rendering inventory: active_tab={active_tab}, shelf_filter={shelf_filter}, products={len(all_products)}, filtered={len(filtered_products)}, reorder={len(reorder_list)}")
         return render_template_string(HTML_TEMPLATE, shelves=shelves, all_products=all_products, filtered_products=filtered_products,
                                      reorder_list=reorder_list, active_tab=active_tab, active_shelf_tab=active_shelf_tab, 
                                      active_manage_tab=active_manage_tab, shelf_filter=shelf_filter)
 
 if __name__ == '__main__':
     init_db()
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
