@@ -1,11 +1,12 @@
 import os
-from flask import Flask, render_template_string, request, session, send_file, jsonify
+from flask import Flask, render_template_string, request, session, send_file, jsonify, make_response
 from io import BytesIO, StringIO
 import sqlite3
 import logging
 import csv
 import json
 from contextlib import contextmanager
+from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
@@ -38,25 +39,62 @@ def get_db():
 def init_db():
     db_path = app.config['DATABASE']
     logger.info(f"Checking database at: {db_path}")
-    if not os.path.exists(db_path):
-        logger.info(f"Creating database at: {db_path}")
+    try:
         with get_db() as conn:
             c = conn.cursor()
+            # Create products table
             c.execute('''CREATE TABLE IF NOT EXISTS products
                          (product_id INTEGER PRIMARY KEY,
-                          product_name TEXT,
+                          product_name TEXT NOT NULL,
                           shelf_number INTEGER,
                           in_stock BOOLEAN)''')
+            # Create shelves table
             c.execute('''CREATE TABLE IF NOT EXISTS shelves
                          (shelf_number INTEGER PRIMARY KEY,
                           checked BOOLEAN)''')
-            for shelf in range(1, 11):
-                c.execute('INSERT OR IGNORE INTO shelves (shelf_number, checked) VALUES (?, ?)', 
-                         (shelf, False))
+            # Create reorder_lists table
+            c.execute('''CREATE TABLE IF NOT EXISTS reorder_lists
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          timestamp TEXT,
+                          content TEXT)''')
+            # Initialize shelves
+            c.execute('SELECT COUNT(*) FROM shelves')
+            if c.fetchone()[0] == 0:
+                for shelf in range(1, 11):
+                    c.execute('INSERT OR IGNORE INTO shelves (shelf_number, checked) VALUES (?, ?)', 
+                             (shelf, False))
+            # Initialize sample products for Shelf 1 (49 products)
+            c.execute('SELECT COUNT(*) FROM products WHERE shelf_number = 1')
+            if c.fetchone()[0] == 0:
+                sample_products = [
+                    ('ALLMOX 125 SUS', 1, True), ('AMOXICILLIN 250 CAP', 1, True), ('ASPIRIN 81MG TAB', 1, True),
+                    ('PARACETAMOL 500 TAB', 1, True), ('IBUPROFEN 400 TAB', 1, True), ('CETIRIZINE 10 TAB', 1, True),
+                    ('LORATADINE 10 TAB', 1, True), ('OMEPRAZOLE 20 CAP', 1, True), ('RANITIDINE 150 TAB', 1, True),
+                    ('METFORMIN 500 TAB', 1, True), ('ATORVASTATIN 20 TAB', 1, True), ('LISINOPRIL 10 TAB', 1, True),
+                    ('AMLODIPINE 5 TAB', 1, True), ('HYDROCHLOROTHIAZIDE 25 TAB', 1, True), ('FUROSEMIDE 40 TAB', 1, True),
+                    ('CLOPIDOGREL 75 TAB', 1, True), ('WARFARIN 5 TAB', 1, True), ('DIGOXIN 0.25 TAB', 1, True),
+                    ('METOPROLOL 50 TAB', 1, True), ('ENALAPRIL 10 TAB', 1, True), ('LOSARTAN 50 TAB', 1, True),
+                    ('GLIPIZIDE 5 TAB', 1, True), ('INSULIN 100U/ML', 1, True), ('LEVOTHYROXINE 100 TAB', 1, True),
+                    ('PREDNISONE 10 TAB', 1, True), ('BUDESONIDE INH', 1, True), ('SALBUTAMOL INH', 1, True),
+                    ('MONTELUKAST 10 TAB', 1, True), ('AZITHROMYCIN 250 TAB', 1, True), ('CIPROFLOXACIN 500 TAB', 1, True),
+                    ('DOXYCYCLINE 100 CAP', 1, True), ('AMOXICILLIN 500 CAP', 1, True), ('PENICILLIN VK 500 TAB', 1, True),
+                    ('CLARITHROMYCIN 500 TAB', 1, True), ('FLUCONAZOLE 150 TAB', 1, True), ('METRONIDAZOLE 500 TAB', 1, True),
+                    ('ONDANSETRON 4 TAB', 1, True), ('LOPERAMIDE 2 CAP', 1, True), ('BISMUTH SUBSALICYLATE TAB', 1, True),
+                    ('MECLIZINE 25 TAB', 1, True), ('DIPHENHYDRAMINE 25 CAP', 1, True), ('ALBUTEROL INH', 1, True),
+                    ('EPINEPHRINE INJ', 1, True), ('NALOXONE INJ', 1, True), ('ACETAMINOPHEN 325 TAB', 1, True),
+                    ('KETOROLAC 10 TAB', 1, True), ('TRAMADOL 50 TAB', 1, True), ('CODEINE 30 TAB', 1, True),
+                    ('MORPHINE 10 INJ', 1, True)
+                ]
+                for i, (name, shelf, in_stock) in enumerate(sample_products, 1):
+                    c.execute('INSERT OR IGNORE INTO products (product_id, product_name, shelf_number, in_stock) VALUES (?, ?, ?, ?)',
+                             (i, name, shelf, in_stock))
             conn.commit()
-            logger.info("Database initialized with shelves")
+            logger.info("Database initialized with products, shelves, and reorder_lists")
+    except sqlite3.Error as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
 
-# HTML template with sub-tabs for Manage Products
+# HTML template with sub-tabs for Manage Products and Reorder List
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -68,7 +106,7 @@ HTML_TEMPLATE = '''
     <style>
         body { background-color: #fffef5; color: #333; }
         .container { max-width: 800px; margin-top: 80px; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        .logo { position: fixed; top: 20px; left: 20px; font-size: 2rem; font-weight: bold; color: #d2b48c; }
+        .logo { position: fixed; top: 10px; left: 10px; font-size: 2rem; font-weight: bold; color: #d2b48c; z-index: 1100; }
         .nav-tabs { border-bottom: 2px solid #d2b48c; margin-bottom: 0; }
         .nav-link { color: #333; }
         .nav-link.active { background-color: #d2b48c !important; color: #fff !important; }
@@ -88,6 +126,10 @@ HTML_TEMPLATE = '''
         .sub-tabs { margin-top: 10px; }
         .form-section { margin-bottom: 20px; }
         .table-container { max-height: 400px; overflow-y: auto; }
+        @media (max-width: 576px) {
+            .container { margin-top: 60px; padding: 15px; }
+            .logo { font-size: 1.5rem; top: 5px; left: 5px; }
+        }
     </style>
 </head>
 <body>
@@ -171,26 +213,79 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
             <div class="tab-pane fade {% if active_tab == 'reorder' %}show active{% endif %}" id="reorder">
-                <h3>Reorder List</h3>
-                <div id="reorder-list-content">
-                    {% if reorder_list %}
-                    <ul class="list-group mb-3">
-                        {% for product in reorder_list %}
-                        <li class="list-group-item">{{ product['product_name'] }}</li>
-                        {% endfor %}
-                    </ul>
-                    <div class="mb-3">
-                        <label class="form-label">Download Format</label>
-                        <select id="reorder-export-format" class="form-control" style="width: 200px; display: inline-block;">
-                            <option value="txt" selected>Text (.txt)</option>
-                            <option value="csv">CSV (.csv)</option>
-                            <option value="json">JSON (.json)</option>
-                        </select>
-                        <a href="/export_reorder_list?format=txt" id="export-reorder-link" class="btn btn-primary ms-2">Download Reorder List</a>
+                <ul class="nav nav-tabs sub-tabs" id="reorderTabs">
+                    <li class="nav-item">
+                        <button class="nav-link {% if active_reorder_tab == 'current-reorder' %}active{% endif %}" id="current-reorder-tab" 
+                                data-bs-toggle="tab" data-bs-target="#current-reorder" type="button">Current Reorder List</button>
+                    </li>
+                    <li class="nav-item">
+                        <button class="nav-link {% if active_reorder_tab == 'saved-reorder' %}active{% endif %}" id="saved-reorder-tab" 
+                                data-bs-toggle="tab" data-bs-target="#saved-reorder" type="button">Saved Reorder Lists</button>
+                    </li>
+                </ul>
+                <div class="tab-content" id="reorderTabContent">
+                    <div class="tab-pane fade {% if active_reorder_tab == 'current-reorder' %}show active{% endif %}" id="current-reorder">
+                        <h3>Current Reorder List</h3>
+                        <div id="reorder-list-content">
+                            {% if reorder_list %}
+                            <ul class="list-group mb-3">
+                                {% for product in reorder_list %}
+                                <li class="list-group-item">{{ product['product_name'] }}</li>
+                                {% endfor %}
+                            </ul>
+                            <div class="mb-3">
+                                <button id="save-reorder-list" class="btn btn-primary me-2">Save List</button>
+                                <label class="form-label">Download Format</label>
+                                <select id="reorder-export-format" class="form-control" style="width: 200px; display: inline-block;">
+                                    <option value="txt" selected>Text (.txt)</option>
+                                    <option value="csv">CSV (.csv)</option>
+                                    <option value="json">JSON (.json)</option>
+                                </select>
+                                <a href="/export_reorder_list?format=txt" id="export-reorder-link" class="btn btn-primary ms-2">Download Reorder List</a>
+                            </div>
+                            {% else %}
+                            <p>No items in the reorder list.</p>
+                            {% endif %}
+                        </div>
                     </div>
-                    {% else %}
-                    <p>No items in the reorder list.</p>
-                    {% endif %}
+                    <div class="tab-pane fade {% if active_reorder_tab == 'saved-reorder' %}show active{% endif %}" id="saved-reorder">
+                        <h3>Saved Reorder Lists</h3>
+                        <div id="saved-reorder-list-content">
+                            {% if saved_reorder_lists %}
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>Products</th>
+                                        <th>Download</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="saved-reorder-table-body">
+                                    {% for saved_list in saved_reorder_lists %}
+                                    <tr data-list-id="{{ saved_list['id'] }}">
+                                        <td>{{ saved_list['timestamp'] }}</td>
+                                        <td>{{ saved_list['products'] | join(', ') }}</td>
+                                        <td>
+                                            <select class="saved-reorder-format form-control" style="width: 120px; display: inline-block;" data-list-id="{{ saved_list['id'] }}">
+                                                <option value="txt" selected>Text (.txt)</option>
+                                                <option value="csv">CSV (.csv)</option>
+                                                <option value="json">JSON (.json)</option>
+                                            </select>
+                                            <a href="/download_saved_reorder_list/{{ saved_list['id'] }}?format=txt" class="saved-reorder-download btn btn-primary btn-sm ms-2" data-list-id="{{ saved_list['id'] }}">Download</a>
+                                        </td>
+                                        <td>
+                                            <button class="delete-reorder-list btn btn-danger btn-sm" data-list-id="{{ saved_list['id'] }}">Delete</button>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                            {% else %}
+                            <p>No saved reorder lists.</p>
+                            {% endif %}
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="tab-pane fade {% if active_tab == 'manage-products' %}show active{% endif %}" id="manage-products">
@@ -428,6 +523,7 @@ HTML_TEMPLATE = '''
                     });
                     html += `</ul>
                         <div class="mb-3">
+                            <button id="save-reorder-list" class="btn btn-primary me-2">Save List</button>
                             <label class="form-label">Download Format</label>
                             <select id="reorder-export-format" class="form-control" style="width: 200px; display: inline-block;">
                                 <option value="txt" selected>Text (.txt)</option>
@@ -441,9 +537,57 @@ HTML_TEMPLATE = '''
                     reorderTab.innerHTML = '<p>No items in the reorder list.</p>';
                 }
                 attachExportFormatListener();
+                attachSaveReorderListListener();
             } catch (error) {
                 console.error('Error fetching reorder list:', error);
                 alert('Error fetching reorder list: ' + error.message);
+            }
+        }
+
+        // Update saved reorder lists
+        async function updateSavedReorderLists() {
+            console.log('Fetching saved reorder lists');
+            try {
+                const response = await fetch('/saved_reorder_lists');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const savedLists = await response.json();
+                console.log('Saved reorder lists fetched:', savedLists);
+                const savedTab = document.getElementById('saved-reorder-list-content');
+                if (!savedTab) {
+                    console.error('Error: #saved-reorder-list-content not found in DOM');
+                    return;
+                }
+                if (savedLists.length > 0) {
+                    let html = '<table class="table table-striped"><thead><tr><th>Timestamp</th><th>Products</th><th>Download</th><th>Action</th></tr></thead><tbody id="saved-reorder-table-body">';
+                    savedLists.forEach(list => {
+                        html += `<tr data-list-id="${list.id}">
+                            <td>${list.timestamp}</td>
+                            <td>${list.products.join(', ')}</td>
+                            <td>
+                                <select class="saved-reorder-format form-control" style="width: 120px; display: inline-block;" data-list-id="${list.id}">
+                                    <option value="txt" selected>Text (.txt)</option>
+                                    <option value="csv">CSV (.csv)</option>
+                                    <option value="json">JSON (.json)</option>
+                                </select>
+                                <a href="/download_saved_reorder_list/${list.id}?format=txt" class="saved-reorder-download btn btn-primary btn-sm ms-2" data-list-id="${list.id}">Download</a>
+                            </td>
+                            <td>
+                                <button class="delete-reorder-list btn btn-danger btn-sm" data-list-id="${list.id}">Delete</button>
+                            </td>
+                        </tr>`;
+                    });
+                    html += '</tbody></table>';
+                    savedTab.innerHTML = html;
+                } else {
+                    savedTab.innerHTML = '<p>No saved reorder lists.</p>';
+                }
+                attachSavedReorderFormatListeners();
+                attachDeleteReorderListListeners();
+            } catch (error) {
+                console.error('Error fetching saved reorder lists:', error);
+                alert('Error fetching saved reorder lists: ' + error.message);
             }
         }
 
@@ -460,6 +604,90 @@ HTML_TEMPLATE = '''
             } else {
                 console.error('Error: #reorder-export-format or #export-reorder-link not found in DOM');
             }
+        }
+
+        // Handle saved reorder list format selection
+        function attachSavedReorderFormatListeners() {
+            document.querySelectorAll('.saved-reorder-format').forEach(select => {
+                const listId = select.getAttribute('data-list-id');
+                const downloadLink = document.querySelector(`.saved-reorder-download[data-list-id="${listId}"]`);
+                if (downloadLink) {
+                    select.addEventListener('change', () => {
+                        const selectedFormat = select.value;
+                        console.log(`Saved reorder list ${listId} format selected:`, selectedFormat);
+                        downloadLink.href = `/download_saved_reorder_list/${listId}?format=${selectedFormat}`;
+                    });
+                } else {
+                    console.error(`Error: .saved-reorder-download for list ${listId} not found in DOM`);
+                }
+            });
+        }
+
+        // Handle save reorder list
+        function attachSaveReorderListListener() {
+            const saveButton = document.getElementById('save-reorder-list');
+            if (saveButton) {
+                saveButton.addEventListener('click', async () => {
+                    console.log('Save reorder list button clicked');
+                    const scrollY = window.scrollY;
+                    try {
+                        const response = await fetch('/save_reorder_list', { method: 'POST' });
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        const result = await response.json();
+                        if (result.status === 'success') {
+                            console.log('Reorder list saved successfully');
+                            alert(result.message);
+                            if (document.getElementById('saved-reorder').classList.contains('show')) {
+                                await updateSavedReorderLists();
+                            }
+                            window.scrollTo(0, scrollY);
+                        } else {
+                            console.error('Error saving reorder list:', result.message);
+                            alert('Error saving reorder list: ' + result.message);
+                        }
+                    } catch (error) {
+                        console.error('Error saving reorder list:', error);
+                        alert('Error saving reorder list: ' + error.message);
+                    }
+                });
+            } else {
+                console.error('Error: #save-reorder-list not found in DOM');
+            }
+        }
+
+        // Handle delete reorder list
+        function attachDeleteReorderListListeners() {
+            document.querySelectorAll('.delete-reorder-list').forEach(button => {
+                button.addEventListener('click', async () => {
+                    const listId = button.getAttribute('data-list-id');
+                    console.log('Delete reorder list button clicked, list_id:', listId);
+                    if (!confirm('Are you sure you want to delete this reorder list?')) {
+                        return;
+                    }
+                    const scrollY = window.scrollY;
+                    try {
+                        const response = await fetch(`/delete_reorder_list/${listId}`, { method: 'POST' });
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        const result = await response.json();
+                        if (result.status === 'success') {
+                            console.log('Reorder list deleted successfully, list_id:', listId);
+                            await updateSavedReorderLists();
+                            window.scrollTo(0, scrollY);
+                            alert('Reorder list deleted successfully');
+                        } else {
+                            console.error('Error deleting reorder list:', result.message);
+                            alert('Error deleting reorder list: ' + result.message);
+                        }
+                    } catch (error) {
+                        console.error('Error deleting reorder list:', error);
+                        alert('Error deleting reorder list: ' + error.message);
+                    }
+                });
+            });
         }
 
         // Handle shelf form submissions
@@ -609,17 +837,23 @@ HTML_TEMPLATE = '''
         // Initialize Bootstrap tabs
         document.addEventListener('DOMContentLoaded', () => {
             console.log('Initializing Bootstrap tabs');
-            document.querySelectorAll('#mainTabs button, #shelfTabs button, #manageTabs button').forEach(triggerEl => {
+            document.querySelectorAll('#mainTabs button, #shelfTabs button, #manageTabs button, #reorderTabs button').forEach(triggerEl => {
                 if (triggerEl.classList.contains('active')) {
                     new bootstrap.Tab(triggerEl).show();
                 }
             });
         });
 
-        // Refresh reorder list when switching to Reorder tab
-        document.getElementById('reorder-tab').addEventListener('shown.bs.tab', async () => {
-            console.log('Reorder tab shown, refreshing list');
+        // Refresh reorder list when switching to Current Reorder tab
+        document.getElementById('current-reorder-tab').addEventListener('shown.bs.tab', async () => {
+            console.log('Current Reorder tab shown, refreshing list');
             await updateReorderList();
+        });
+
+        // Refresh saved reorder lists when switching to Saved Reorder tab
+        document.getElementById('saved-reorder-tab').addEventListener('shown.bs.tab', async () => {
+            console.log('Saved Reorder tab shown, refreshing list');
+            await updateSavedReorderLists();
         });
     </script>
 </body>
@@ -632,7 +866,12 @@ def index():
     if not session.get('show_inventory'):
         session['show_inventory'] = False
     return render_template_string(HTML_TEMPLATE, shelves=[], all_products=[], filtered_products=[], reorder_list=[],
-                                 active_tab='shelves', active_shelf_tab='shelf1', active_manage_tab='existing-products', shelf_filter='all')
+                                 saved_reorder_lists=[], active_tab='shelves', active_shelf_tab='shelf1', 
+                                 active_manage_tab='existing-products', active_reorder_tab='current-reorder', shelf_filter='all')
+
+@app.route('/favicon.ico')
+def favicon():
+    return make_response('', 204)
 
 @app.route('/start_session', methods=['POST'])
 def start_session():
@@ -728,6 +967,51 @@ def update_shelf(shelf_number):
             logger.error(f"Error updating shelf: {e}")
             return jsonify({'status': 'error', 'message': 'Error updating shelf.'})
 
+@app.route('/save_reorder_list', methods=['POST'])
+def save_reorder_list():
+    session['show_inventory'] = True
+    timestamp = datetime.now().strftime('%d-%m-%y_%I:%M%p').lower()
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT p.product_id, p.product_name, p.shelf_number
+            FROM products p JOIN shelves s ON p.shelf_number = s.shelf_number
+            WHERE p.in_stock = 0 AND s.checked = 1
+            ORDER BY p.shelf_number, p.product_name
+        ''')
+        reorder_list = c.fetchall()
+        if not reorder_list:
+            logger.warning("Attempted to save empty reorder list")
+            return jsonify({'status': 'error', 'message': 'No items in the reorder list to save.'})
+        product_names = [product['product_name'] for product in reorder_list]
+        try:
+            c.execute('INSERT INTO reorder_lists (timestamp, content) VALUES (?, ?)',
+                     (timestamp, json.dumps(product_names)))
+            conn.commit()
+            logger.info(f"Saved reorder list to database, timestamp={timestamp}, count={len(reorder_list)}")
+            return jsonify({'status': 'success', 'message': 'Reorder list saved successfully.'})
+        except sqlite3.Error as e:
+            logger.error(f"Error saving reorder list: {e}")
+            return jsonify({'status': 'error', 'message': 'Error saving reorder list.'})
+
+@app.route('/delete_reorder_list/<int:list_id>', methods=['POST'])
+def delete_reorder_list(list_id):
+    session['show_inventory'] = True
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('SELECT id FROM reorder_lists WHERE id = ?', (list_id,))
+        if not c.fetchone():
+            logger.error(f"Attempted to delete non-existent reorder list: id={list_id}")
+            return jsonify({'status': 'error', 'message': 'Reorder list not found.'})
+        try:
+            c.execute('DELETE FROM reorder_lists WHERE id = ?', (list_id,))
+            conn.commit()
+            logger.info(f"Deleted reorder list ID: {list_id}")
+            return jsonify({'status': 'success', 'message': 'Reorder list deleted successfully.'})
+        except sqlite3.Error as e:
+            logger.error(f"Error deleting reorder list: {e}")
+            return jsonify({'status': 'error', 'message': 'Error deleting reorder list.'})
+
 @app.route('/import_products', methods=['POST'])
 def import_products():
     session['show_inventory'] = True
@@ -819,6 +1103,7 @@ def import_products():
 @app.route('/export_products')
 def export_products():
     session['show_inventory'] = True
+    timestamp = datetime.now().strftime('%d-%m-%y_%I:%M%p').lower()
     with get_db() as conn:
         c = conn.cursor()
         c.execute('SELECT * FROM products ORDER BY product_id')
@@ -840,7 +1125,7 @@ def export_products():
             bytes_output,
             mimetype='text/csv',
             as_attachment=True,
-            download_name='products_export.csv'
+            download_name=f'products_export_{timestamp}.csv'
         )
 
 @app.route('/export_reorder_list')
@@ -849,6 +1134,7 @@ def export_reorder_list():
     export_format = request.args.get('format', 'txt')
     if export_format not in ['txt', 'csv', 'json']:
         export_format = 'txt'
+    timestamp = datetime.now().strftime('%d-%m-%y_%I:%M%p').lower()
     with get_db() as conn:
         c = conn.cursor()
         c.execute('''
@@ -858,6 +1144,15 @@ def export_reorder_list():
             ORDER BY p.shelf_number, p.product_name
         ''')
         reorder_list = c.fetchall()
+        product_names = [product['product_name'] for product in reorder_list]
+        # Save to reorder_lists table
+        try:
+            c.execute('INSERT INTO reorder_lists (timestamp, content) VALUES (?, ?)',
+                     (timestamp, json.dumps(product_names)))
+            conn.commit()
+            logger.info(f"Saved reorder list to database, timestamp={timestamp}, count={len(reorder_list)}")
+        except sqlite3.Error as e:
+            logger.error(f"Error saving reorder list: {e}")
         if export_format == 'txt':
             output = StringIO()
             for product in reorder_list:
@@ -869,7 +1164,7 @@ def export_reorder_list():
                 bytes_output,
                 mimetype='text/plain',
                 as_attachment=True,
-                download_name='reorder_list.txt'
+                download_name=f'reorder_list_{timestamp}.txt'
             )
         elif export_format == 'csv':
             output = StringIO()
@@ -888,10 +1183,9 @@ def export_reorder_list():
                 bytes_output,
                 mimetype='text/csv',
                 as_attachment=True,
-                download_name='reorder_list.csv'
+                download_name=f'reorder_list_{timestamp}.csv'
             )
         else:  # json
-            product_names = [product['product_name'] for product in reorder_list]
             output = StringIO()
             json.dump(product_names, output, indent=2)
             output.seek(0)
@@ -901,7 +1195,77 @@ def export_reorder_list():
                 bytes_output,
                 mimetype='application/json',
                 as_attachment=True,
-                download_name='reorder_list.json'
+                download_name=f'reorder_list_{timestamp}.json'
+            )
+
+@app.route('/saved_reorder_lists')
+def saved_reorder_lists():
+    session['show_inventory'] = True
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('SELECT id, timestamp, content FROM reorder_lists ORDER BY id DESC')
+        saved_lists = c.fetchall()
+        parsed_lists = [
+            {'id': sl['id'], 'timestamp': sl['timestamp'], 'products': json.loads(sl['content'])}
+            for sl in saved_lists
+        ]
+        logger.info(f"Fetched saved reorder lists, count={len(saved_lists)}")
+        return jsonify(parsed_lists)
+
+@app.route('/download_saved_reorder_list/<int:list_id>')
+def download_saved_reorder_list(list_id):
+    session['show_inventory'] = True
+    export_format = request.args.get('format', 'txt')
+    if export_format not in ['txt', 'csv', 'json']:
+        export_format = 'txt'
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute('SELECT timestamp, content FROM reorder_lists WHERE id = ?', (list_id,))
+        saved_list = c.fetchone()
+        if not saved_list:
+            logger.error(f"Saved reorder list not found: id={list_id}")
+            return jsonify({'status': 'error', 'message': 'Saved reorder list not found.'})
+        timestamp = saved_list['timestamp']
+        product_names = json.loads(saved_list['content'])
+        if export_format == 'txt':
+            output = StringIO()
+            for name in product_names:
+                output.write(f"{name}\n")
+            output.seek(0)
+            bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+            logger.info(f"Downloaded saved reorder list id={list_id} as TXT")
+            return send_file(
+                bytes_output,
+                mimetype='text/plain',
+                as_attachment=True,
+                download_name=f'reorder_list_{timestamp}.txt'
+            )
+        elif export_format == 'csv':
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=['product_name'], lineterminator='\n')
+            writer.writeheader()
+            for name in product_names:
+                writer.writerow({'product_name': name})
+            output.seek(0)
+            bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+            logger.info(f"Downloaded saved reorder list id={list_id} as CSV")
+            return send_file(
+                bytes_output,
+                mimetype='text/csv',
+                as_attachment=True,
+                download_name=f'reorder_list_{timestamp}.csv'
+            )
+        else:  # json
+            output = StringIO()
+            json.dump(product_names, output, indent=2)
+            output.seek(0)
+            bytes_output = BytesIO(output.getvalue().encode('utf-8'))
+            logger.info(f"Downloaded saved reorder list id={list_id} as JSON")
+            return send_file(
+                bytes_output,
+                mimetype='application/json',
+                as_attachment=True,
+                download_name=f'reorder_list_{timestamp}.json'
             )
 
 @app.route('/filter_products', methods=['GET'])
@@ -938,7 +1302,8 @@ def get_reorder_list():
         return jsonify([{'product_id': p['product_id'], 'product_name': p['product_name'], 
                         'shelf_number': p['shelf_number']} for p in reorder_list])
 
-def show_inventory(active_tab='shelves', active_shelf_tab='shelf1', active_manage_tab='existing-products', shelf_filter='all'):
+def show_inventory(active_tab='shelves', active_shelf_tab='shelf1', active_manage_tab='existing-products', 
+                  active_reorder_tab='current-reorder', shelf_filter='all'):
     session['show_inventory'] = True
     with get_db() as conn:
         c = conn.cursor()
@@ -958,10 +1323,17 @@ def show_inventory(active_tab='shelves', active_shelf_tab='shelf1', active_manag
             ORDER BY p.shelf_number, p.product_name
         ''')
         reorder_list = c.fetchall()
-        logger.info(f"Rendering inventory: active_tab={active_tab}, shelf_filter={shelf_filter}, products={len(all_products)}, filtered={len(filtered_products)}, reorder={len(reorder_list)}")
+        c.execute('SELECT id, timestamp, content FROM reorder_lists ORDER BY id DESC')
+        saved_lists = c.fetchall()
+        saved_reorder_lists = [
+            {'id': sl['id'], 'timestamp': sl['timestamp'], 'products': json.loads(sl['content'])}
+            for sl in saved_lists
+        ]
+        logger.info(f"Rendering inventory: active_tab={active_tab}, shelf_filter={shelf_filter}, products={len(all_products)}, filtered={len(filtered_products)}, reorder={len(reorder_list)}, saved_reorder={len(saved_reorder_lists)}")
         return render_template_string(HTML_TEMPLATE, shelves=shelves, all_products=all_products, filtered_products=filtered_products,
-                                     reorder_list=reorder_list, active_tab=active_tab, active_shelf_tab=active_shelf_tab, 
-                                     active_manage_tab=active_manage_tab, shelf_filter=shelf_filter)
+                                     reorder_list=reorder_list, saved_reorder_lists=saved_reorder_lists, active_tab=active_tab, 
+                                     active_shelf_tab=active_shelf_tab, active_manage_tab=active_manage_tab, 
+                                     active_reorder_tab=active_reorder_tab, shelf_filter=shelf_filter)
 
 if __name__ == '__main__':
     init_db()
