@@ -195,7 +195,7 @@ HTML_TEMPLATE = '''
                                 {% set shelf_products = all_products | selectattr('shelf_number', 'equalto', shelf) | list %}
                                 {% if shelf_products %}
                                 {% for product in shelf_products %}
-                                <div class="col-md-4 mb-2">
+                                <div class="col-md-6 mb-2">
                                     <label class="form-check-label">
                                         <input type="checkbox" class="form-check-input product-checkbox" name="product_{{ product['product_id'] }}" 
                                                {% if product['in_stock'] %}checked{% endif %}>
@@ -887,7 +887,7 @@ def start_session():
             logger.info("New session started, reset products and shelves")
         else:
             logger.info("Continuing previous session")
-    return show_inventory()
+        return show_inventory()
 
 @app.route('/add_product', methods=['POST'])
 def add_product():
